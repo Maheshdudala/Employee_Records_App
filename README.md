@@ -23,7 +23,7 @@ This project is a **high-performance client-server application** that processes 
 1. **Clone the repository:**
    ```bash
    git clone https://github.com/Maheshdudala/Employee_Records_App.git
-   cd employee-system
+   cd Employee_App
    ```
 
 2. **Create a virtual environment & activate it:**
