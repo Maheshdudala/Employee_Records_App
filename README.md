@@ -147,8 +147,12 @@ The client reads employee records from a CSV file and sends them to the API usin
 
 ### **Python Client Script** (`client.py`)
 ```python
-import requests
-import csv
+import asyncio
+import aiohttp
+import pandas as pd
+import logging
+from aiohttp import ClientSession
+import threading
 
 # API Endpoints
 API_URL = "http://127.0.0.1:8000/api/employees/"
@@ -161,49 +165,79 @@ PASSWORD = "admin"
 # CSV file path
 CSV_FILE_PATH = "employees.csv"
 
-def get_jwt_token():
-    """Fetch JWT token using admin credentials."""
-    response = requests.post(TOKEN_URL, data={"username": USERNAME, "password": PASSWORD})
-    if response.status_code == 200:
-        return response.json().get("access")
-    else:
-        print("Error getting token:", response.json())
-        return None
+# Logging setup
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-def send_employee_records():
-    """Read employee records from CSV and send to API."""
-    token = get_jwt_token()
-    if not token:
-        print("Authentication failed. Exiting.")
+# Batch size for sending records in chunks
+BATCH_SIZE = 500
+MAX_RETRIES = 3  # Maximum retry attempts for failed requests
+
+
+async def get_auth_token():
+    """Fetch JWT token using admin credentials."""
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(
+                TOKEN_URL,
+                json={"username": USERNAME, "password": PASSWORD},
+                headers={"Content-Type": "application/json"},
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("access")  # Get access token
+                else:
+                    logging.error(f"❌ Authentication failed! Status: {response.status}, Response: {await response.text()}")
+                    return None
+        except aiohttp.ClientError as e:
+            logging.error(f"❌ Error during authentication: {e}")
+            return None
+
+
+async def send_batch(session: ClientSession, batch: list, auth_token: str):
+    """Send a batch of employee records asynchronously."""
+    headers = {"Authorization": f"Bearer {auth_token}", "Content-Type": "application/json"}
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            async with session.post(API_URL, json=batch, headers=headers) as response:
+                if response.status == 201:
+                    logging.info(f"✅ Successfully uploaded {len(batch)} records.")
+                    return True
+                else:
+                    logging.error(f"⚠️ Failed to upload. Status: {response.status}, Response: {await response.text()}")
+        except aiohttp.ClientError as e:
+            logging.error(f"❌ Request failed: {e}")
+
+        logging.info(f"🔄 Retrying batch ({attempt + 1}/{MAX_RETRIES})...")
+        await asyncio.sleep(2)  # Wait before retrying
+
+    logging.error(f"❌ Failed after {MAX_RETRIES} retries.")
+    return False
+
+
+async def process_csv(file_path: str):
+    """Read CSV and process employee records in bulk."""
+    auth_token = await get_auth_token()
+    if not auth_token:
+        logging.error("❌ Exiting due to authentication failure.")
         return
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
+    df = pd.read_csv(file_path)
+    employee_records = df.to_dict(orient="records")
 
-    with open(CSV_FILE_PATH, mode="r", encoding="utf-8") as file:
-        reader = csv.DictReader(file)
-        for row in reader:
-            employee_data = {
-                "employee_id": row["employee_id"],
-                "name": row["name"],
-                "email": row["email"],
-                "department": row["department"],
-                "designation": row["designation"],
-                "salary": float(row["salary"]),  # Convert salary to float
-                "date_of_joining": row["date_of_joining"]
-            }
 
-            response = requests.post(API_URL, json=employee_data, headers=headers)
+    async with aiohttp.ClientSession() as session:
 
-            if response.status_code == 201:
-                print(f"Employee {employee_data['name']} added successfully!")
-            else:
-                print(f"Error adding {employee_data['name']}: {response.json()}")
+        tasks = []
+        for i in range(0, len(employee_records), BATCH_SIZE):
+            batch = employee_records[i : i + BATCH_SIZE]
+            tasks.append(send_batch(session, batch, auth_token))
+
+        await asyncio.gather(*tasks)
+
 
 if __name__ == "__main__":
-    send_employee_records()
+    asyncio.run(process_csv(CSV_FILE_PATH))
 
 ```
 
